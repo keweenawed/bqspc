@@ -4,69 +4,77 @@
 
 namespace bqspc {
 
-extern int precomputedDivisorValues[MaxSeriesLimit];
+/* The number of worker threads to use. */
+const static int WorkerThreadsToUse = 10;
+
 extern long *precomputedDivisorList[MaxSeriesLimit];
+extern int precomputedDivisorFunction[MaxSeriesLimit];
 
 };
 
 using namespace bqspc;
 
-/* Entry point for the worker threads. */
-static void worker_thread_entry(ParameterGenerator& generator)
+static void workerThreadEntry(ParameterGenerator *generator)
 {
-	/* This seems silly, but this is absolutely necessary to prevent
-	 * stack overflow on some platforms. */
-	WorkerThread *worker = new WorkerThread();
+	WorkerThread worker(generator);
 
-	worker->jobLoop(generator);
-	delete worker;
+	worker.jobLoop();
 }
 
+/* No arguments are parsed. The range of parameters used must be specified at
+ * compile time for now. The result will be written in the format of a LaTeX
+ * file that can immediately be built into a pdf without extra work. */
 int main(void)
 {
 	ParameterGenerator generator;
-	std::thread threads[WorkerThreadNumber];
+	std::thread threads[WorkerThreadsToUse];
 
-	/* Populate the divisor table. This uses a brute force algorithm, and
-	 * does not really benefit from a more efficient method  since this is
-	 * only performed once. */
-	for (long n = 1; n < MaxSeriesLimit; ++n) {
+	/* Populate the precomputed divisors using a brute force algorithm since
+	 * this is only done once, and does not benefit from extra efficiency. */
+	precomputedDivisorFunction[0] = 0;
+	precomputedDivisorList[0] = nullptr;
+
+	for (long nIndex = 1; nIndex < MaxSeriesLimit; ++nIndex) {
 		long buffer[MaxSeriesLimit];
 		int length = 0;
 
-		for (long k = 1; k <= n/ 2; ++k) {
-			if (n % k == 0) {
-				buffer[length++] = k;
+		/* Fill the buffer with every value that divides nIndex. */
+		for (long kIndex = 1; kIndex <= nIndex / 2; ++kIndex) {
+			if (nIndex % kIndex == 0) {
+				buffer[length++] = kIndex;
 			}
 		}
 
-		buffer[length++] = n;
-		precomputedDivisorList[n] = new long[length];
+		buffer[length++] = nIndex;
 
-		for (int k = 0; k < length; ++k) {
-			precomputedDivisorList[n][k] = buffer[k];
+		/* Create the next entry in the divisor list and copy the divisors
+		 * over, and save the value of the divisor function. */
+		precomputedDivisorList[nIndex] = new long[length];
+
+		for (int kIndex = 0; kIndex < length; ++kIndex) {
+			precomputedDivisorList[nIndex][kIndex] = buffer[kIndex];
 		}
 
-		precomputedDivisorValues[n] = length;
+		precomputedDivisorFunction[nIndex] = length;
 	}
 
 	/* Header for the LaTeX output. */
 	std::cout << "\\documentclass{article}\n"\
-		     "\\usepackage[margin=1in]{geometry}\n"\
-		     "\\begin{document}\n\n";
+				 "\\usepackage[margin=1in]{geometry}\n"\
+				 "\\begin{document}\n\n";
 
-	/* Create worker threads to hunt for identities in parallel. */
-	for (int n = 0; n < WorkerThreadNumber; ++n) {
-		threads[n] = std::thread(worker_thread_entry,
-					 std::ref(generator));
+	/* Create the worker threads. */
+	for (int index = 0; index < WorkerThreadsToUse; ++index) {
+		threads[index] = std::thread(workerThreadEntry, &generator);
 	}
 
-	for (int n = 0; n < WorkerThreadNumber; ++n) {
-		threads[n].join();
+	/* Cleanup. */
+	for (int index = 0; index < WorkerThreadsToUse; ++index) {
+		threads[index].join();
 	}
 
-	for (int n = 1; n < MaxSeriesLimit; ++n) {
-		delete precomputedDivisorList[n];
+	for (int index = 1; index < MaxSeriesLimit; ++index) {
+		delete precomputedDivisorList[index];
 	}
 
 	/* Footer for the LaTeX output. */

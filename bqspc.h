@@ -1,76 +1,173 @@
 
-namespace bqspc
-{
+namespace bqspc {
 
-/* Largest coefficient to truncate all series computations at. */
+/* The largest allowed coefficient to truncate $q$-series computations at. */
 const static int MaxSeriesLimit = 100;
 
-/* Largest modulus q-series product to consider in the search. */
+/* Longest pattern of powers in the truncated product to search for. */
 const static int MaxProductSignatureLength = 50;
 
-/* Largest number of q-Pochhammer symbols to allow on the sum side. */
-const static int MaxNumberQPS = 2;
+/* The largest number of $q$-series summation indices allowed. */
+const static int MaxIndices = 2;
 
-/* Largest degree 1 and 2 coefficients for the sum side power of q.*/
-const static int MaxQPowerDegree1 = 5;
-const static int MaxQPowerDegree2 = 5;
+/* The largest number of distinct $q$-Pochhammer symbols allowed in a
+ * single $q$-series, ignoring multiplicity. */
+const static int MaxQPS = 2;
 
-/* Largest degree 1 coefficient for the sum side power of z.*/
-const static int MaxZPower = 2;
+/* Number of $q$-series parameters to cache per worker thread. */
+const static int JobQueueLimit = 100;
 
-/* Largest values the parameters in the q-Pochhammer symbols on the sum side
- * can take. Written $(z^a q^b; q^c)^d_{en+f}^f)$, these are in alphabetical
- * order. */
-const static int MaxQPSParameters[6] = {0, 6, 6, 4, 3, 3};
-
-/* Number of worker threads to use. */
-const static int WorkerThreadNumber = 8;
-
-/* Size of the job queue each worker thread uses. */
-const static int MaxJobQueueLimit = 20;
-
-class Parameters;
-
-/* Parent class for both kinds of series. */
-class Series
+/* The parameters that fully determine a particular $q$-series of the form
+ * $\sum_{n_0, \dots, n_\ell \geq 0} (-1)^{d \times (n_0 + \cdots + n_\ell))}
+ * \times q^{c(n_0 \dots, n_\ell)} \prod_{i=0}^k
+ * (\pm q^{a_i};q^{b_i})_{s_i(n_0, \dots, n_\ell)}^{p_i}$, where $\ell \geq 0$
+ * determines the number of summation indices to use, $d \in \{0, 1\}$, $c$ is
+ * a nonnegative degree 1 or 2 polynomial in $n_0, dots, n_\ell$, $k \geq 0$
+ * determines the number of $q$-Pochhammer symbols, $p_i$ is any nonzero power
+ * on them, $s_i$ is a linear function in $n_0, \dots, n_\ell$ that is not
+ * identically zero, and the dilations satisfy $a_i, b_i \geq 1$ with
+ * $a_i = 0$ additionally allowed if $p_i > 0$. */
+class Parameters
 {
-protected:
+public:
 
-	/* The power of the coefficient to truncated computations at. This can
-	 * be at most the value of MaxSeriesLimit. */
-	int qLimit;
+	/* Set to true to for $d=1$, and false for $d=0$. */
+	bool alternatingSign;
+
+	/* Set to true to divide the coefficients of $c$ all by 2. This is only
+	 * permitted if doing so preserves $c$ being integer valued. */
+	bool dividePowerBy2;
+
+	/* The number of summation indices $\ell + 1$ to use. */
+	int indicesInUse;
+
+	/* The number of distinct q-Pochhammer symbols $k + 1$ to use. */
+	int qPSInUse;
+	
+	/* Coefficients of the pure degree 1 and 2 powers in $c$, respectively,
+	 * stored so the coefficient of $n_i$ and $n_i$^2 is at index $i$. */
+	int qScalarsDegree1[MaxIndices];
+	int qScalarsDegree2Pure[MaxIndices];
+
+	/* Here, for $0 \leq i < j \leq \ell$, the coefficient of $n_in_j$ is
+	 * stored respecting the ordering $n_0n_1, \dots, n_0n_\ell, n_1n_2,
+	 * \dots, n_1n_\ell, \dots, n_{\ell-1}n_\ell$. */
+	int qScalarsDegree2Mixed[MaxIndices * (MaxIndices - 1) / 2];
+
+	/* Parameters of $(\pm q^{a_i};q^{b_i})_{s(n_0, \dots, n_\ell)}^{p_i}$ are
+	 * stored at index $i$, where $\pm$ is given by negativePrefix, dilation1
+	 * is $a_i$, dilation2 is $b_i$, power is $p_i$, and the coefficients of
+	 * $s_i(n_0, \dots, n_\ell) = f_0 n_0 + \cdots + f_\ell n_\ell$ are stored
+	 * in subScalars so $f_j$ is at index $j$. */
+	class {
+	public:
+		int dilation1;
+		int dilation2;
+		bool negativePrefix;
+		int power;
+		int subScalars[MaxIndices];
+	} qPS[MaxQPS];
 };
 
-/* Stores the parameters of infinite q-Pochhammer symbols that determine the
- * product side of a Rogers-Ramanujan type identity. */
+class WorkerThread;
+
+/* Iterates through all parameter combinations to provide the threads work. */
+class ParameterGenerator : private Parameters
+{
+	friend class WorkerThread;
+
+	bool continueWorking;
+
+	void advance(void);
+	void populate(WorkerThread&);
+
+public:
+	ParameterGenerator(void);
+};
+
+class QSeries;
+
+/* Encodes the product signature of a truncated $q$-series, which is the
+ * minimal length pattern $a_1, \dots, a_\ell$ of repeating powers appearing
+ * when the $q$-series is factored as the infinite product of geometric series 
+ * $\prod_{n \geq 1} \frac{1}{(1-q^n)^{a_n}}$, if such a pattern exists. */
 class ProductSignature
 {
-public:
+	friend class QSeries;
+	friend class WorkerThread;
+
+	/* The length of the pattern. */
 	int period;
+
+	/* The sequence of powers that forms the pattern. */
 	long powers[MaxProductSignatureLength];
 
-	long dilation(void);
-};
-
-/* Encodes a truncated univariate series. */
-class SeriesUv : public Series
-{
-private:
-	/* The coefficient of q^n is given by coefficients[n]. */
-	long coefficients[MaxSeriesLimit];
-
-	void qPochhammer(int, int, int, int, int);
+	long pairwiseGCD(long, long);
 
 public:
-	SeriesUv(void) {this->qLimit = MaxSeriesLimit;}
+	long dilation(void);
+	void factorize(QSeries&);
+};
 
-	void qSeries(class Parameters&);
-	void factorize(ProductSignature&);
+/* Stores the truncated coefficients of a $q$-series, and provides all
+ * functionality for truncated $q$-series arithmetic and manipulations. */
+class QSeries
+{
+	friend class ProductSignature;
 
-	inline bool operator==(const class SeriesUv& series)
+	/* The $q$-series coefficients, stored so the coefficient of $q^i$ is at
+	 * the index $i$. */
+	long coefficients[MaxSeriesLimit];
+
+	/* The coefficient to truncate all computations at. */
+	int limit;
+
+	void reciprocal(void);
+	void raiseToPower(int);
+	void qPochhammer(int, int, bool, int);
+	void qBinomial(int, int);
+	int qSeriesPower(Parameters&, int (&)[MaxIndices]);
+	void qSeriesTerm(Parameters&, int (&)[MaxIndices]);
+
+public:
+
+	void qSeries(Parameters&);
+
+	QSeries(int limit = MaxSeriesLimit) {this->limit = limit;}
+
+	/* Sets all coefficients to zero. */
+	inline void zero(void)
 	{
-		for (int n = 0; n < this->qLimit; ++n) {
-			if (this->coefficients[n] != series.coefficients[n]) {
+		for (int index = 0; index < MaxSeriesLimit; ++index) {
+			this->coefficients[index] = 0;
+		}
+	}
+
+	/* Shifts all coefficients over by the value of power, or equivalently,
+	 * computes the truncated multiplication by $q^{power}$. */
+	inline void translate(int power)
+	{
+		QSeries copy = *this;
+
+		for (int index = 0; index < power; ++index) {
+			this->coefficients[index] = 0;
+		}
+
+		for (int index = 0; index < this->limit - power; ++index) {
+			this->coefficients[index + power] = copy.coefficients[index];
+		}
+	}
+
+
+	/* All of the following methods that act on two $q$-series assume both
+	 * of them have an equal value of limit. The calling functions are always
+	 * responsible for ensuring this is true. */
+
+	/* Two $q$-series are deemed equal when they have equal coefficients. */
+	inline bool operator==(const QSeries& series)
+	{
+		for (int index = 0; index < this->limit; ++index) {
+			if (this->coefficients[index] != series.coefficients[index]) {
 				return false;
 			}
 		}
@@ -78,342 +175,107 @@ public:
 		return true;
 	}
 
-	inline class SeriesUv operator+(const class SeriesUv& series)
+	/* Adds the coefficients of two $q$-series. */
+	inline QSeries operator+(const QSeries& series)
 	{
-		class SeriesUv result;
+		QSeries result(this->limit);
 
-		result.qLimit = this->qLimit;
-
-		for (int n = 0; n < this->qLimit; ++n) {
-			result.coefficients[n] = this->coefficients[n]
-					       + series.coefficients[n];
+		for (int index = 0; index < this->limit; ++index) {
+			result.coefficients[index] = this->coefficients[index]
+									   + series.coefficients[index];
 		}
 
 		return result;
 	}
 
-	inline class SeriesUv& operator+=(const class SeriesUv& series)
+	inline QSeries& operator+=(const QSeries& series)
 	{
-		class SeriesUv copy;
+		QSeries copy;
 
 		copy = *this;
 		*this = copy + series;
 		return *this;
 	}
 
-	inline class SeriesUv operator*(const class SeriesUv& series)
+	/* Computes the product of two $q$-series using the quadratic time Cauchy
+	 * product. Experimentally, this is faster than the asymptotically
+	 * superior Karatsuba's algorithm for this use case. */
+	inline QSeries operator*(const QSeries& series)
 	{
-		class SeriesUv result;
+		QSeries result(this->limit);
 
-		result.qLimit = this->qLimit;
+		for (int nIndex = 0; nIndex < this->limit; ++nIndex) {
+			result.coefficients[nIndex] = 0;
 
-		/* Compute the Cauchy product. */
-		for (int n = 0; n <= this->qLimit; ++n) {
-			result.coefficients[n] = 0;
-
-			for (int k = 0; k <= n; ++k) {
-				result.coefficients[n]
-					+= this->coefficients[k]
-					* series.coefficients[n - k];
+			for (int kIndex = 0; kIndex <= nIndex; ++kIndex) {
+				result.coefficients[nIndex]
+					+= this->coefficients[kIndex]
+					* series.coefficients[nIndex - kIndex];
 			}
 		}
 
 		return result;
 	}
 
-	inline class SeriesUv& operator*=(const class SeriesUv& series)
+	inline QSeries& operator*=(const QSeries& series)
 	{
-		class SeriesUv copy;
+		QSeries copy = *this;
 
-		copy = *this;
 		*this = copy * series;
 		return *this;
 
 	}
 
-	inline class SeriesUv operator-(void)
+	/* Negates the coefficients of the $q$-series. */
+	inline QSeries operator-(void)
 	{
-		class SeriesUv result;
+		QSeries result(this->limit);
 
-		result.qLimit = this->qLimit;
-
-		for (int n = 0; n < this->qLimit; ++n) {
-			result.coefficients[n] = -this->coefficients[n];
+		for (int index = 0; index < this->limit; ++index) {
+			result.coefficients[index] = -this->coefficients[index];
 		}
 
 		return result;
-	}
-
-	inline void zero(void)
-	{
-		for (int n = 0; n < this->qLimit; ++n) {
-			this->coefficients[n] = 0;
-		}
-	}
-
-	/* Computes the truncated q-binomial Coefficient, which is defined
-	 * $(q;q)_{top}/((q;q)_{bottom}(q;q){top - bottom})$. */
-	inline void qBinomial(int top, int bottom)
-	{
-		class SeriesUv factor;
-
-		this->zero();
-		this->coefficients[0] = 1;
-		factor.qLimit = this->qLimit;
-		factor.qPochhammer(1, 1, 1, 1, top);
-		*this *= factor;
-		factor.qPochhammer(1, 1, 1, -1, bottom);
-		*this *= factor;
-		factor.qPochhammer(1, 1, 1, -1, top - bottom);
-		*this *= factor;
-	}
-
-	/* Multiplies the series by $q^{power}$. */
-	inline void translate(int qPower)
-	{
-		class SeriesUv copy = *this;
-
-		for (int n = 0; n < qPower; ++n) {
-			this->coefficients[n] = 0;
-		}
-
-		for (int n = 0; n < this->qLimit - qPower; ++n) {
-			this->coefficients[n + qPower] = copy.coefficients[n];
-		}
-	}
-};
-
-/* Encodes a truncated bivariate series. This is currently not used in the
- * program, but will be in future versions. */
-class SeriesBv : public Series
-{
-private:
-
-	/* All coefficients at or past $q^{qLimit}z^{zLimit}$ are truncated.
-	 * This value can be at most MaxSeriesLimit. */
-	int zLimit;
-
-	/* The coefficient of $q^n z^k$ is coefficients[n][k]$. */
-	long coefficients[MaxSeriesLimit][MaxSeriesLimit];
-
-	void qPochhammer(int, int, int , int, int, int);
-
-public:
-	SeriesBv(void)
-	{
-		this->qLimit = MaxSeriesLimit;
-		this->zLimit = MaxSeriesLimit;
-	}
-
-	void qSeries(class Parameters&);
-	void generalizeProduct(ProductSignature&);
-
-	inline bool operator==(const class SeriesBv& series)
-	{
-		for (int n = 0; n < this->qLimit; ++n) {
-			for (int k = 0; k < this->zLimit; ++k) {
-				if (this->coefficients[n][k]
-				    != series.coefficients[n][k]) {
-					return false;
-				}
-			}
-		}
-
-		return true;
-	}
-
-	inline bool operator!=(const class SeriesBv& series)
-	{
-		return !(*this == series);
-	}
-
-	inline class SeriesBv operator+(const class SeriesBv& series)
-	{
-		class SeriesBv result;
-
-		result.qLimit = this->qLimit;
-		result.zLimit = this->zLimit;
-
-		for (int n = 0; n < this->qLimit; ++n) {
-			for (int k = 0; k < this->zLimit; ++k) {
-				result.coefficients[n][k]
-					= this->coefficients[n][k]
-					+ series.coefficients[n][k];
-			}
-		}
-
-		return result;
-	}
-
-	inline class SeriesBv& operator+=(const class SeriesBv& series)
-	{
-		class SeriesBv copy;
-
-		copy = *this;
-		*this = copy + series;
-		return *this;
-	}
-
-	inline class SeriesBv operator*(const class SeriesBv& series)
-	{
-		class SeriesBv result;
-
-		result.qLimit = this->qLimit;
-		result.zLimit = this->zLimit;
-		result.zero();
-
-		/* Double Cauchy product. */
-		for (int n1 = 0; n1 < this->qLimit; ++n1) {
-			for (int n2 = 0; n2 <= n1; ++n2) {
-				long buffer[MaxSeriesLimit];
-				const long *c1 = this->coefficients[n2];
-				const long *c2 = series.coefficients[n1 - n2];
-
-				for (int k1 = 0; k1 < this->zLimit; ++k1) {
-					buffer[k1] = 0;
-
-					for (int k2 = 0; k2 <= k1; ++k2) {
-						buffer[k1] += c1[k1 - k2]
-							    * c2[k2];
-					}
-				}
-
-				for (int k = 0; k < this->zLimit; ++k) {
-					result.coefficients[n1][k]
-						+= buffer[k];
-				}
-			}
-		}
-
-		return result;
-	}
-
-	inline class SeriesBv& operator*=(const class SeriesBv& series)
-	{
-		class SeriesBv copy;
-
-		copy = *this;
-		*this = copy * series;
-		return *this;
-
-	}
-
-	inline class SeriesBv operator-(void)
-	{
-		class SeriesBv result;
-
-		result.qLimit = this->qLimit;
-		result.zLimit = this->zLimit;
-
-		for (int n = 0; n < this->qLimit; ++n) {
-			for (int k = 0; k < this->zLimit; ++k) {
-				result.coefficients[n][k]
-					= -this->coefficients[n][k];
-			}
-		}
-
-		return result;
-	}
-
-	inline void zero(void)
-	{
-		for (int n = 0; n < this->qLimit; ++n) {
-			for (int k = 0; k < this->zLimit; ++k) {
-				this->coefficients[n][k] = 0;
-			}
-		}
-	}
-
-	/* Multiplies the series by $q^{qPower}z^{zPower}$. $*/
-	inline void translate(int qPower, int zPower)
-	{
-		class SeriesBv copy = *this;
-
-		this->zero();
-
-		for (int n = 0; n < this->qLimit - qPower; ++n) {
-			for (int k = 0; k < this->zLimit - zPower; ++k) {
-				this->coefficients[n + qPower][k + zPower]
-					= copy.coefficients[n][k];
-			}
-		}
-	}
-};
-
-/* The parameters that determine the sum side of a q-series identity. */
-class Parameters
-{
-public:
-	/* Coefficients for the degree 1 and 2 terms on the power of q. */
-	int qScalarDeg1;
-	int qScalarDeg2;
-
-	/* Set true if the power of q is to be divided by 2. */
-	bool dividePowerBy2;
-
-	/* Set true to put an alternating sign on the series. */
-	bool alternatingSign;
-
-	/* Number of q-Pochhammer symbols. */
-	int qPSLength;
-
-	/* Coefficient for the degree 1 term on the power of z. */
-	int zScalar;
-
-	/* The q-Pochhammer symbols are stored so that the nth from the left
-	 * begins at the address of qPS[n * 6]. */
-	int qPS[MaxNumberQPS * 6];
-};
-
-class WorkerThread;
-
-/* Universal interface that threads use to get more work. */
-class ParameterGenerator: private Parameters
-{
-private:
-
-	/* Set true until all parameter combinations are exhausted. */
-	bool keepWorking;
-
-	void advanceState(void);
-	void checkParameterRedundancy(void);
-
-public:
-	void populateJobQueue(WorkerThread&);
-
-	ParameterGenerator(void)
-	{
-		this->qScalarDeg1 = 0;
-		this->qScalarDeg2 = 1;
-		this->dividePowerBy2 = false;
-		this->alternatingSign = false;
-		this->qPSLength = 0;
-		this->zScalar = 0;
-
-		for (int n = 0; n < MaxNumberQPS * 6; ++n) {
-			this->qPS[n] = 0;
-		}
-
-		this->keepWorking = true;
 	}
 };
 
 /* Data and methods for each worker thread. */
 class WorkerThread
 {
-private:
-
-	/* Buffer of parameters to try that belong only to the worker. */
-	int jobQueueLength;
-	Parameters jobQueue[MaxJobQueueLimit];
-
-	void tryCombinationUv(Parameters&);
-	void reportIdentity(Parameters&, ProductSignature&);
-
-public:
 	friend class ParameterGenerator;
 
-	void jobLoop(ParameterGenerator&);
+	/* Points to the universal generator. */
+	ParameterGenerator *generator;
+
+	/* Cache of parameters to try. */
+	Parameters *jobQueue[JobQueueLimit];
+
+	/* Number of parameters in the cache. */
+	int jobQueueLength;
+
+	void reportIdentity(Parameters&, ProductSignature&);
+	void tryCombination(Parameters&);
+
+public:
+	void jobLoop(void);
+
+	WorkerThread(ParameterGenerator *generator)
+	{
+		this->generator = generator;
+
+		/* The amount of memory this class can take up if new is not used here
+		 * may cause a stack overflow. */
+		for (int index = 0; index < JobQueueLimit; ++index) {
+			jobQueue[index] = new Parameters();
+		}
+	}
+
+	~WorkerThread(void)
+	{
+		for (int index = 0; index < JobQueueLimit; ++index) {
+			delete jobQueue[index];
+		}
+	}
 };
 
 };

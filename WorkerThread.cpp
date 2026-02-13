@@ -1,4 +1,5 @@
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <sstream>
 #include "bqspc.h"
@@ -6,11 +7,10 @@
 namespace bqspc
 {
 
-/* Prints out a conjectured identity formatted for LaTeX. */
-void WorkerThread::reportIdentity(class Parameters& parameters,
-				  class ProductSignature& signature)
+/* Prints out a conjectured sum-product identity fully formatted for LaTeX. */
+void WorkerThread::reportIdentity(Parameters& parameters,
+								  ProductSignature &signature)
 {
-	bool bivariate = false;
 	std::string sum;
 	std::string prod;
 	std::string sumNum;
@@ -19,115 +19,150 @@ void WorkerThread::reportIdentity(class Parameters& parameters,
 	std::string prodDen;
 	std::stringstream output;
 
-	sum += "\\sum_{n=0}^\\infty ";
+	bool powerUsePlus = false;
 
-	auto prettyPrint = [&](int value, std::string variable) {
+	/* Helper function for printing powers of $q$. */
+	auto prettyPrint = [&](int value) {
 		if (value == 0) return std::string("1");
 
-		if (value == 1) return variable;
+		if (value == 1) return std::string("q");
 
-		return variable
-			+ "^{"
-			+ std::to_string(value)
-			+ "}";
+		return "q^{" + std::to_string(value) + "}";
 	};
 
-	if (parameters.alternatingSign) {
-		sumNum += "(-1)^n";
-	}
-
-	if (parameters.zScalar != 0) {
-		sumNum += "z^{";
-		bivariate = true;
-
-		if (parameters.zScalar != 1) {
-			sumNum += std::to_string(parameters.zScalar);
-		}
-
-		sumNum += "n}";
+	/* Sigma notation. */
+	if (parameters.indicesInUse == 1) {
+		sum += "\\sum_{n_0\\geq 0} ";
+	} else if (parameters.indicesInUse == 2) {
+		sum += "\\sum_{n_0,n_1\\geq 0} ";
+	} else {
+		sum += "\\sum_{n_0,\\dots,n_{" + std::to_string(
+			   parameters.indicesInUse - 1) + "}\\geq 0} ";
 	}
 
 	sumNum += "q^{";
 
-	if (parameters.dividePowerBy2) {
-		sumNum += "\\frac{";
-	}
+	/* The function $c(n_0, \dots, n_\ell)$. */
+	for (int index = 0; index < parameters.indicesInUse; ++index) {
+		std::string term;
 
-	if (parameters.qScalarDeg2 != 0) {
-		if (parameters.qScalarDeg2 != 1) {
-			sumNum += std::to_string(parameters.qScalarDeg2);
+		if (parameters.qScalarsDegree2Pure[index] == 0) {
+			continue;
+		} else if (parameters.qScalarsDegree2Pure[index] != 1) {
+			term += std::to_string(parameters.qScalarsDegree2Pure[index]);
 		}
 
-		sumNum += "n^2";
-	}
-	
-	if (parameters.qScalarDeg1 != 0) {
-		if (parameters.qScalarDeg2 != 0) {
-			sumNum += " + ";
-		}
+		term += "n_{" + std::to_string(index) + "}^2";
 
-		if (parameters.qScalarDeg1 != 1) {
-			sumNum += std::to_string(parameters.qScalarDeg1);
+		if (powerUsePlus) {
+			sumNum += "+" + term;
+		} else {
+			sumNum += term;
+			powerUsePlus = true;
 		}
-
-		sumNum += "n";
 	}
 
-	if (parameters.dividePowerBy2) {
-		sumNum += "}{2}";
+	for (int nIndex = 0; nIndex < parameters.indicesInUse; ++nIndex) {
+		for (int kIndex = nIndex + 1; kIndex <
+			 parameters.indicesInUse; ++kIndex) {
+
+			std::string term;
+
+			int mIndex = nIndex * (parameters.indicesInUse - 1)
+					   - nIndex * (nIndex - 1) / 2 + kIndex - 1;
+
+			if (parameters.qScalarsDegree2Mixed[mIndex] == 0) {
+				continue;
+			} else if (parameters.qScalarsDegree2Mixed[mIndex] != 1) {
+				term += std::to_string(
+						parameters.qScalarsDegree2Mixed[mIndex]);
+			}
+
+			term += "n_{" + std::to_string(nIndex) + "}"
+			      + "n_{" + std::to_string(kIndex) + "}";
+
+			if (powerUsePlus) {
+				sumNum += "+" + term;
+			} else {
+				sumNum += term;
+				powerUsePlus = true;
+			}
+		}
+	}
+
+	for (int index = 0; index < parameters.indicesInUse; ++index) {
+		std::string term;
+
+		if (parameters.qScalarsDegree1[index] == 0) {
+			continue;
+		} else if (parameters.qScalarsDegree1[index] != 1) {
+			term += std::to_string(parameters.qScalarsDegree1[index]);
+		}
+
+		term += "n_{" + std::to_string(index) + "}";
+
+		if (powerUsePlus) {
+			sumNum += "+" + term;
+		} else {
+			sumNum += term;
+			powerUsePlus = true;
+		}
 	}
 
 	sumNum += "}";
 
-	for (int n = 0; n < parameters.qPSLength; ++n) {
-		int power;
+	/* The $q$-Pochhammer symbols. */
+	for (int nIndex = 0; nIndex < parameters.qPSInUse; ++nIndex) {
+		int powerAbs = parameters.qPS[nIndex].power;
 		std::string qPS;
 
 		qPS += "(";
 
-		if (parameters.qPS[6 * n + 3] > 0) {
+		if (parameters.qPS[nIndex].negativePrefix) {
 			qPS += "-";
 		}
 
-		if (parameters.qPS[6 * n + 0] != 0) {
-			bivariate = true;
-			qPS += prettyPrint(parameters.qPS[6 * n + 0], "z");
-		}
-
-		if (parameters.qPS[6 * n + 1] != 0) {
-			qPS += prettyPrint(parameters.qPS[6 * n + 1], "q");
-		}
-
-		if (parameters.qPS[6 * n + 0] == 0 &&
-		    parameters.qPS[6 * n + 1] == 0) {
+		if (parameters.qPS[nIndex].dilation1 == 0) {
 			qPS += "1";
-		}
-		qPS += "; " + prettyPrint(parameters.qPS[6 * n + 2], "q")
-		    + ")_{";
-
-		if (parameters.qPS[6 * n + 4] != 1) {
-			qPS += std::to_string(parameters.qPS[6 * n + 4]);
+		} else {
+			qPS += prettyPrint(parameters.qPS[nIndex].dilation1);
 		}
 
-		qPS += "n";
+		qPS += "; " + prettyPrint(parameters.qPS[nIndex].dilation1) + ")_{";
 
-		if (parameters.qPS[6 * n + 5] != 0) {
-		    qPS += " + "
-		        + std::to_string(parameters.qPS[6 * n + 5]);
+		powerUsePlus = false;
+
+		for (int kIndex = 0; kIndex < parameters.indicesInUse; ++kIndex) {
+			std::string term;
+
+			if (parameters.qPS[nIndex].subScalars[kIndex] == 0) {
+				continue;
+			} else if (parameters.qPS[nIndex].subScalars[kIndex] != 1) {
+				term = std::to_string(
+					   parameters.qPS[nIndex].subScalars[kIndex]);
+			}
+
+			term += "n_{" + std::to_string(kIndex) + "}";
+
+			if (powerUsePlus) {
+				qPS += "+" + term;
+			} else {
+				qPS += term;
+				powerUsePlus = true;
+			}
 		}
 
 		qPS += "}";
-		power = parameters.qPS[6 * n + 3];
 
-		if (power < 0) {
-			power = -power;
+		if (powerAbs < 0) {
+			powerAbs = -powerAbs;
 		}
 
-		if (power > 1) {
-			qPS += "^{" + std::to_string(power) + "}";
+		if (powerAbs > 1) {
+			qPS += "^{" + std::to_string(powerAbs) + "}";
 		}
 
-		if (parameters.qPS[6 * n + 3] > 0) {
+		if (parameters.qPS[nIndex].power > 0) {
 			sumNum += qPS;
 		} else {
 			sumDen += qPS;
@@ -141,30 +176,26 @@ void WorkerThread::reportIdentity(class Parameters& parameters,
 		sum += sumNum;
 	}
 
-	for (int n = 0; n < signature.period; ++n) {
-		int power;
+	/* Now for the product side. */
+	for (int index = 0; index < signature.period; ++index) {
+		int powerAbs;
 		std::string qPS;
 
-		if (signature.powers[n] == 0) continue;
+		if (signature.powers[index] == 0) continue;
 
-		qPS += "(";
+		qPS += "(" + prettyPrint(index + 1) + "; "
+		    + prettyPrint(signature.period) + ")_{\\infty}";
+		powerAbs = signature.powers[index];
 
-		if (bivariate) {
-			qPS += "z";
+		if (powerAbs < 0) {
+			powerAbs = -powerAbs;
 		}
 
-		qPS += prettyPrint(n + 1, "q") + "; "
-		    + prettyPrint(signature.period, "q") + ")_{\\infty}";
-
-		power = signature.powers[n];
-
-		if (power != 1) {
-			if (power < 0) power = -power;
-
-			qPS += "^{" + std::to_string(power) + "}";
+		if (powerAbs != 1) {
+			qPS += "^{" + std::to_string(powerAbs) + "}";
 		}
 
-		if (signature.powers[n] > 0) {
+		if (signature.powers[index] > 0) {
 			prodDen += qPS;
 		} else {
 			prodNum += qPS;
@@ -183,54 +214,45 @@ void WorkerThread::reportIdentity(class Parameters& parameters,
 		}
 	}
 
-	output << "$$" + sum + " = " + prod + "$$\n";
+	/* Write the result to stdout. This is threadsafe and does not require
+	 * holding a mutex. */
+	output << "\\begin{equation}\n" + sum + " = "
+			  + prod + "\n\\end{equation}\n";
 	std::cout << output.str();
 }
 
-/* Determines if the given parameters may lead to a q-series identity. */
-void WorkerThread::tryCombinationUv(Parameters& parameters)
+/* Attempts to find a sum-product identity from the given parameters. */
+void WorkerThread::tryCombination(Parameters& parameters)
 {
 	ProductSignature signature;
-	SeriesUv candidate;
+	QSeries candidate;
 
-	/* Generate the univariate q-series coefficients and factor them. */
+	/* Generate the $q$-series coefficients and factor them. */
 	candidate.qSeries(parameters);
-	candidate.factorize(signature);
+	signature.factorize(candidate);
 
-	if (signature.period == 0) return;
+	/* If there is no sum-product identity found or if the identity is dilated
+	 * then this parameter combination is considered a failure. */
+	if (signature.period == 0 || signature.dilation() > 1) return;
 
-	/* Compute the GCD of all entries in the signature. If this is not
-	 * equal to 1, we have a dilated result which should be thrown out. */
-	if (signature.dilation() > 1) return;
-
-	/* If a pattern was detected, we have a conjectured univariate
-	 * identity. Report this. */
+	/* Otherwise, report the identity and move on. */
 	this->reportIdentity(parameters, signature);
 }
 
-/* Acquires and executes jobs from the parameter generator on loop. */
-void WorkerThread::jobLoop(class ParameterGenerator& generator)
+/* Acquires and executes jobs from the generator on loop. */
+void WorkerThread::jobLoop(void)
 {
 	for (;;) {
 
 		/* Get some work. */
-		generator.populateJobQueue(*this);
+		this->generator->populate(*this);
 
-		/* The parameter generator will notify the worker threads that
+		/* The generator will notify the worker threads that
 		 * the work is finished by not providing any jobs here. */
 		if (this->jobQueueLength == 0) return;
 
-		for (int n = 0; n < this->jobQueueLength; ++n) {
-			this->tryCombinationUv(this->jobQueue[n]);
-
-			/* If the power of q has odd coefficients on both the
-			 * degree 1 and 2 terms, we can divide the total power
-			 * by 2, which may lead an identity. */
-			if ((this->jobQueue[n].qScalarDeg1 % 2) == 1 &&
-			    (this->jobQueue[n].qScalarDeg2 % 2) == 1) {
-				this->jobQueue[n].dividePowerBy2 = true;
-				this->tryCombinationUv(this->jobQueue[n]);
-			}
+		for (int index = 0; index < this->jobQueueLength; ++index) {
+			this->tryCombination(*this->jobQueue[index]);
 		}
 	}
 }
